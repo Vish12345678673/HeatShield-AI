@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # HeatShield AI
 
 HeatShield AI is a standalone TanStack Start + React application for hyperlocal heat intelligence.
@@ -52,3 +53,7 @@ The debug APK is normally produced at:
 `android/app/build/outputs/apk/debug/app-debug.apk`
 
 The Android shell is standalone, but live FortyGuard data and Google Maps remain optional external services. The app falls back to local data and its canvas map when those services are unavailable.
+=======
+# HeatShield-AI
+HeatShield AI uses FortyGuard’s live environmental data to turn a city into a heat-risk map, identify high-exposure zones, and calculate routes that minimize heat exposure instead of simply minimizing travel time. Users can compare fastest, balanced, and coolest routes, while city planners can simulate interventions and estimate their impact .
+>>>>>>> 95d49e2dcd3cfdb3f85ae70ee4e9e53e4677ab4f
