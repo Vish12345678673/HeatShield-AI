@@ -1,268 +1,226 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
+
 import type { Metro } from "@/lib/metros";
+import type { RouteOption } from "@/lib/heat-engine";
+
+import {
+  loadGoogleMaps,
+  DARK_STYLES,
+} from "@/components/heatshield/GoogleHeatMap";
 
 import {
   TONE_HEX,
   riskBand,
-  ZONES,
-  type RouteOption,
 } from "@/lib/heat-engine";
-
-import {
-  DARK_STYLES,
-  loadGoogleMaps,
-  zoneLatLng,
-} from "@/components/heatshield/GoogleHeatMap";
-
-import {
-  HeatMap,
-  layerValue,
-} from "@/components/heatshield/HeatMap";
 
 import { cn } from "@/lib/utils";
 
-/**
- * Decode Google's encoded polyline format into
- * Google Maps latitude/longitude coordinates.
- */
-function decodePolyline(
-  encoded: string,
-): google.maps.LatLngLiteral[] {
-  const points: google.maps.LatLngLiteral[] = [];
-
-  let index = 0;
-  let lat = 0;
-  let lng = 0;
-
-  while (index < encoded.length) {
-    let result = 0;
-    let shift = 0;
-    let byte: number;
-
-    do {
-      byte = encoded.charCodeAt(index++) - 63;
-      result |= (byte & 0x1f) << shift;
-      shift += 5;
-    } while (byte >= 0x20);
-
-    lat +=
-      result & 1
-        ? ~(result >> 1)
-        : result >> 1;
-
-    result = 0;
-    shift = 0;
-
-    do {
-      byte = encoded.charCodeAt(index++) - 63;
-      result |= (byte & 0x1f) << shift;
-      shift += 5;
-    } while (byte >= 0x20);
-
-    lng +=
-      result & 1
-        ? ~(result >> 1)
-        : result >> 1;
-
-    points.push({
-      lat: lat / 1e5,
-      lng: lng / 1e5,
-    });
-  }
-
-  return points;
+interface GoogleRouteMapProps {
+  metro: Metro;
+  start: string;
+  destination: string;
+  routes: RouteOption[];
+  activeRouteId?: string;
+  compare?: boolean;
+  onRoutesCalculated: (
+    routes: RouteOption[],
+  ) => void;
+  onRouteError: (
+    message: string,
+  ) => void;
+  className?: string;
 }
 
-/**
- * Legacy fallback for synthetic routes.
- *
- * If a route does not contain a real Google Routes API
- * encoded polyline or lat/lng path, project its normalized
- * coordinates into the selected metro's geographic box.
- */
+type RoutePoint = {
+  x: number;
+  y: number;
+};
+
 function pathLatLng(
   metro: Metro,
-  p: { x: number; y: number },
+  point: RoutePoint,
 ): google.maps.LatLngLiteral {
   return {
     lat:
       metro.box.north -
-      p.y * (metro.box.north - metro.box.south),
+      point.y *
+        (metro.box.north - metro.box.south),
 
     lng:
       metro.box.west +
-      p.x * (metro.box.east - metro.box.west),
+      point.x *
+        (metro.box.east - metro.box.west),
   };
 }
 
-interface GoogleRouteMapProps {
-  metro: Metro;
-  routes: RouteOption[];
-  activeRouteId?: string | undefined;
-  compare?: boolean;
-  className?: string | undefined;
+function getValidPoints(
+  path: RouteOption["path"],
+): RoutePoint[] {
+  return path.filter(
+    (
+      point,
+    ): point is RoutePoint =>
+      point != null &&
+      Number.isFinite(point.x) &&
+      Number.isFinite(point.y),
+  );
 }
 
-/**
- * Google Maps route visualization.
- *
- * Priority:
- *
- * 1. Real Google Routes API encoded polyline
- * 2. Already decoded lat/lng path
- * 3. Synthetic normalized route projected into selected metro
- *
- * Falls back to the existing HeatMap renderer if Google Maps
- * cannot be loaded.
- */
 export function GoogleRouteMap({
   metro,
+  start,
+  destination,
   routes,
   activeRouteId,
-  compare,
+  compare = false,
+  onRoutesCalculated,
+  onRouteError,
   className,
 }: GoogleRouteMapProps) {
-  const browserKey = import.meta.env[
-    "VITE_GOOGLE_MAPS_BROWSER_KEY"
-  ] as string | undefined;
+  const browserKey =
+    (import.meta.env[
+      "VITE_GOOGLE_MAPS_BROWSER_KEY"
+    ] as string | undefined) ?? "";
 
-  const channel = import.meta.env[
-    "VITE_GOOGLE_MAPS_TRACKING_ID"
-  ] as string | undefined;
+  const channel =
+    (import.meta.env[
+      "VITE_GOOGLE_MAPS_TRACKING_ID"
+    ] as string | undefined) ?? "";
 
-  const wrapRef = useRef<HTMLDivElement>(null);
+  const mapContainerRef =
+    useRef<HTMLDivElement>(null);
 
-  const mapRef = useRef<google.maps.Map | null>(null);
+  const mapRef =
+    useRef<google.maps.Map | null>(null);
 
-  const polylinesRef = useRef<
-    Map<string, google.maps.Polyline>
-  >(new Map());
+  const polylinesRef =
+    useRef<
+      Map<
+        string,
+        google.maps.Polyline
+      >
+    >(new Map());
 
-  const markersRef = useRef<
-    google.maps.Marker[]
-  >([]);
+  const markersRef =
+    useRef<google.maps.Marker[]>([]);
 
-  const [failed, setFailed] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] =
+    useState(false);
 
-  /**
+  const [failed, setFailed] =
+    useState(false);
+
+  const onRouteErrorRef =
+    useRef(onRouteError);
+
+  const onRoutesCalculatedRef =
+    useRef(onRoutesCalculated);
+
+  useEffect(() => {
+    onRouteErrorRef.current =
+      onRouteError;
+  }, [onRouteError]);
+
+  useEffect(() => {
+    onRoutesCalculatedRef.current =
+      onRoutesCalculated;
+  }, [onRoutesCalculated]);
+
+  /*
    * Initialize Google Maps.
-   *
-   * The map is centered on the currently selected metro.
    */
   useEffect(() => {
     if (!browserKey) {
       setFailed(true);
+      setReady(false);
+
+      onRouteErrorRef.current(
+        "Google Maps browser API key is not configured.",
+      );
+
       return;
     }
 
     let cancelled = false;
 
-    setReady(false);
+    async function initializeMap() {
+      try {
+        await loadGoogleMaps(
+          browserKey,
+          channel,
+        );
 
-    loadGoogleMaps(browserKey, channel)
-      .then(() => {
-        if (
-          cancelled ||
-          !wrapRef.current
-        ) {
+        if (cancelled) {
           return;
         }
 
-        /**
-         * Remove old map instance references when
-         * metro changes and the effect runs again.
-         */
-        if (mapRef.current) {
-          mapRef.current = null;
+        const container =
+          mapContainerRef.current;
+
+        if (!container) {
+          return;
         }
 
-        const map = new google.maps.Map(
-          wrapRef.current,
-          {
-            center: {
-              lat: metro.lat,
-              lng: metro.lng,
+        const map =
+          new google.maps.Map(
+            container,
+            {
+              center: {
+                lat: metro.lat,
+                lng: metro.lng,
+              },
+
+              zoom: 13,
+
+              styles: DARK_STYLES,
+
+              disableDefaultUI: true,
+
+              zoomControl: true,
+
+              gestureHandling:
+                "greedy",
+
+              clickableIcons: false,
+
+              backgroundColor:
+                "#070B16",
             },
+          );
 
-            zoom: 13,
-
-            styles: DARK_STYLES,
-
-            disableDefaultUI: true,
-
-            zoomControl: true,
-
-            gestureHandling: "greedy",
-
-            clickableIcons: false,
-
-            backgroundColor: "#070B16",
-          },
-        );
+        if (cancelled) {
+          return;
+        }
 
         mapRef.current = map;
 
-        /**
-         * Add subtle thermal context.
-         *
-         * Uses the currently available ZONES dataset.
-         */
-        for (const z of ZONES) {
-          const value = layerValue(
-            z,
-            "risk",
-          );
-
-          if (value < 55) {
-            continue;
-          }
-
-          const band = riskBand(value);
-
-          new google.maps.Circle({
-            map,
-
-            center: zoneLatLng(
-              metro,
-              z,
-            ),
-
-            radius:
-              380 +
-              (z.populationPct / 100) *
-                1250,
-
-            clickable: false,
-
-            fillColor: band.hex,
-
-            fillOpacity:
-              0.05 +
-              (value / 100) * 0.12,
-
-            strokeColor: band.hex,
-
-            strokeOpacity: 0.25,
-
-            strokeWeight: 1,
-          });
+        setFailed(false);
+        setReady(true);
+      } catch (error) {
+        if (cancelled) {
+          return;
         }
 
-        setReady(true);
-      })
-      .catch(() => {
+        console.error(
+          "[HeatShield AI] Google Maps initialization failed:",
+          error,
+        );
+
         setFailed(true);
         setReady(false);
-      });
+
+        onRouteErrorRef.current(
+          "Google Maps could not be loaded.",
+        );
+      }
+    }
+
+    void initializeMap();
 
     return () => {
       cancelled = true;
 
-      /**
-       * Remove existing polylines.
-       */
       for (
         const polyline of
         polylinesRef.current.values()
@@ -272,27 +230,35 @@ export function GoogleRouteMap({
 
       polylinesRef.current.clear();
 
-      /**
-       * Remove existing markers.
-       */
       for (
-        const marker of markersRef.current
+        const marker of
+        markersRef.current
       ) {
         marker.setMap(null);
       }
 
       markersRef.current = [];
 
-      mapRef.current = null;
+      if (mapRef.current) {
+        google.maps.event.clearInstanceListeners(
+          mapRef.current,
+        );
+
+        mapRef.current = null;
+      }
+
+      setReady(false);
     };
   }, [
     browserKey,
     channel,
-    metro,
+    metro.id,
+    metro.lat,
+    metro.lng,
   ]);
 
-  /**
-   * Draw and update routes.
+  /*
+   * Draw routes.
    */
   useEffect(() => {
     const map = mapRef.current;
@@ -301,9 +267,6 @@ export function GoogleRouteMap({
       return;
     }
 
-    /**
-     * Remove previous polylines.
-     */
     for (
       const polyline of
       polylinesRef.current.values()
@@ -313,20 +276,6 @@ export function GoogleRouteMap({
 
     polylinesRef.current.clear();
 
-    /**
-     * Remove previous markers.
-     */
-    for (
-      const marker of markersRef.current
-    ) {
-      marker.setMap(null);
-    }
-
-    markersRef.current = [];
-
-    /**
-     * Nothing to display.
-     */
     if (!routes.length) {
       return;
     }
@@ -334,257 +283,275 @@ export function GoogleRouteMap({
     const bounds =
       new google.maps.LatLngBounds();
 
-    /**
-     * First route's actual coordinates.
-     * Used for start/end markers.
-     */
-    let firstRoutePath:
-      google.maps.LatLngLiteral[] = [];
-
-    /**
-     * Draw every route.
-     */
     for (const route of routes) {
-      let path:
-        google.maps.LatLngLiteral[];
-
-      /**
-       * Preferred:
-       * real Google Routes API encoded polyline.
-       */
-      if (route.encodedPolyline) {
-        path = decodePolyline(
-          route.encodedPolyline,
-        );
-      }
-
-      /**
-       * Secondary:
-       * already-decoded real coordinates.
-       */
-      else if (
-        route.latLngPath &&
-        route.latLngPath.length > 0
+      if (
+        !route.path ||
+        route.path.length === 0
       ) {
-        path = route.latLngPath;
+        continue;
       }
 
-      /**
-       * Legacy fallback:
-       * normalized synthetic coordinates.
-       */
-      else {
-        path = route.path.map(
-          (
-            point: {
-              x: number;
-              y: number;
-            },
-          ) =>
+      const validPoints =
+        getValidPoints(
+          route.path,
+        );
+
+      if (!validPoints.length) {
+        continue;
+      }
+
+      const points =
+        validPoints.map(
+          (point) =>
             pathLatLng(
               metro,
               point,
             ),
         );
-      }
-
-      /**
-       * Ignore invalid routes.
-       */
-      if (!path.length) {
-        continue;
-      }
-
-      if (
-        route.id ===
-        routes[0]?.id
-      ) {
-        firstRoutePath = path;
-      }
-
-      /**
-       * Extend map bounds.
-       */
-      for (const point of path) {
-        bounds.extend(point);
-      }
 
       const isActive =
         compare ||
-        activeRouteId === route.id;
+        route.id ===
+          activeRouteId;
+
+      const band =
+        riskBand(
+          route.exposure,
+        );
+
+      const tone =
+        TONE_HEX[band.tone];
 
       const polyline =
         new google.maps.Polyline({
-          map,
-
-          path,
+          path: points,
 
           geodesic: true,
 
-          strokeColor:
-            TONE_HEX[route.tone],
+          strokeColor: tone,
 
           strokeOpacity:
             isActive
               ? 0.95
-              : 0.3,
+              : 0.32,
 
           strokeWeight:
             isActive
               ? 6
-              : 4,
+              : 3,
 
           zIndex:
             isActive
-              ? 3
-              : 1,
+              ? 20
+              : 10,
+
+          map,
         });
 
       polylinesRef.current.set(
         route.id,
         polyline,
       );
+
+      for (const point of points) {
+        bounds.extend(point);
+      }
     }
 
-    /**
-     * Start/end markers.
-     */
-    const first =
-      firstRoutePath[0];
-
-    const last =
-      firstRoutePath[
-        firstRoutePath.length - 1
-      ];
-
-    if (first && last) {
-      const createMarker = (
-        position:
-          google.maps.LatLngLiteral,
-        color: string,
-        text: string,
-      ): google.maps.Marker => {
-        return new google.maps.Marker({
-          map,
-
-          position,
-
-          clickable: false,
-
-          icon: {
-            path:
-              google.maps.SymbolPath
-                .CIRCLE,
-
-            scale: 11,
-
-            fillColor: color,
-
-            fillOpacity: 1,
-
-            strokeColor:
-              "#070B16",
-
-            strokeWeight: 3.5,
-          },
-
-          label: {
-            text,
-
-            color: "#070B16",
-
-            fontSize: "11px",
-
-            fontWeight: "800",
-          },
-
-          zIndex: 10,
-        });
-      };
-
-      markersRef.current.push(
-        createMarker(
-          first,
-          TONE_HEX.low,
-          "A",
-        ),
-      );
-
-      markersRef.current.push(
-        createMarker(
-          last,
-          TONE_HEX.extreme,
-          "B",
-        ),
-      );
-    }
-
-    /**
-     * Fit map to actual route geometry.
-     */
     if (!bounds.isEmpty()) {
       map.fitBounds(
         bounds,
-        90,
+        48,
       );
     }
   }, [
+    metro,
     routes,
     activeRouteId,
     compare,
     ready,
-    metro,
-
   ]);
 
-  /**
-   * Google Maps unavailable:
-   * use existing canvas fallback.
+  /*
+   * Draw start and destination markers.
    */
-  if (
-    failed ||
-    !browserKey
-  ) {
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!map || !ready) {
+      return;
+    }
+
+    for (
+      const marker of
+      markersRef.current
+    ) {
+      marker.setMap(null);
+    }
+
+    markersRef.current = [];
+
+    if (!routes.length) {
+      return;
+    }
+
+    const selectedRoute =
+      routes.find(
+        (route) =>
+          route.id ===
+          activeRouteId,
+      ) ?? routes[0];
+
+    if (!selectedRoute) {
+      return;
+    }
+
+    const validPoints =
+      getValidPoints(
+        selectedRoute.path,
+      );
+
+    if (!validPoints.length) {
+      return;
+    }
+
+    const first =
+      validPoints[0];
+
+    const last =
+      validPoints[
+        validPoints.length - 1
+      ];
+
+    if (!first || !last) {
+      return;
+    }
+
+    const startPosition =
+      pathLatLng(
+        metro,
+        first,
+      );
+
+    const endPosition =
+      pathLatLng(
+        metro,
+        last,
+      );
+
+    const startMarker =
+      new google.maps.Marker({
+        map,
+        position:
+          startPosition,
+        title:
+          start || "Start",
+        label: {
+          text: "A",
+          color: "#ffffff",
+          fontWeight: "700",
+        },
+      });
+
+    const endMarker =
+      new google.maps.Marker({
+        map,
+        position:
+          endPosition,
+        title:
+          destination ||
+          "Destination",
+        label: {
+          text: "B",
+          color: "#ffffff",
+          fontWeight: "700",
+        },
+      });
+
+    markersRef.current.push(
+      startMarker,
+      endMarker,
+    );
+
+    return () => {
+      startMarker.setMap(null);
+      endMarker.setMap(null);
+    };
+  }, [
+    metro,
+    routes,
+    activeRouteId,
+    ready,
+    start,
+    destination,
+  ]);
+
+  /*
+   * Keep callback available for the existing
+   * GoogleRouteMapProps contract.
+   */
+  useEffect(() => {
+    void onRoutesCalculatedRef.current;
+  }, []);
+
+  /*
+   * Google Maps failed.
+   */
+  if (failed) {
     return (
-      <HeatMap
-        mode="2d"
-        zones={ZONES}
-        layer="risk"
-        routes={routes}
-        activeRouteId={
-          compare
-            ? undefined
-            : activeRouteId
-        }
-        className={className}
-      />
+      <div
+        className={cn(
+          "relative flex min-h-[420px] items-center justify-center overflow-hidden rounded-2xl border border-border bg-background",
+          className,
+        )}
+      >
+        <div className="max-w-sm px-6 text-center">
+          <p className="font-display text-sm font-semibold">
+            Google Maps unavailable
+          </p>
+
+          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            Configure
+            VITE_GOOGLE_MAPS_BROWSER_KEY
+            to enable the live map.
+          </p>
+        </div>
+      </div>
     );
   }
 
-  /**
-   * Google Maps UI.
+  /*
+   * Normal map.
    */
   return (
     <div
       className={cn(
-        "relative overflow-hidden rounded-2xl border border-border bg-popover",
+        "relative min-h-[420px] overflow-hidden rounded-2xl border border-border bg-background",
         className,
       )}
     >
+      {/*
+       * IMPORTANT:
+       * Google Maps owns this DOM node.
+       * Never put React children inside it.
+       */}
       <div
-        ref={wrapRef}
+        ref={mapContainerRef}
         className="absolute inset-0"
       />
 
-      {!ready ? (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-popover">
-          <Loader2 className="size-6 animate-spin text-peach" />
-
-          <p className="font-display text-xs tracking-[0.18em] text-muted-foreground">
-            LOADING LIVE MAP
-          </p>
+      {/*
+       * React-owned loading layer.
+       * This stays OUTSIDE the Google Maps node.
+       */}
+      {!ready && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/60 backdrop-blur-sm">
+          <div className="flex items-center gap-2 rounded-xl border border-border bg-card/90 px-4 py-3 text-xs text-muted-foreground shadow-xl">
+            <Loader2 className="size-4 animate-spin text-cyan" />
+            <span>Loading map…</span>
+          </div>
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

@@ -1,282 +1,440 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { useState, type FormEvent } from "react";
-import { CircleDot, Flag, Clock3, Route as RouteIcon, Loader2, GitCompareArrows } from "lucide-react";
-import { HeatMap } from "@/components/heatshield/HeatMap";
-import { GoogleRouteMap } from "@/components/heatshield/GoogleRouteMap";
-import { GlassCard, LiveIndicator, PageHeader, ToneBadge } from "@/components/heatshield/primitives";
-import { useMetro } from "@/lib/metros";
-import { RouteCard } from "@/components/heatshield/cards";
+﻿import { createFileRoute } from "@tanstack/react-router";
+import { useEffect, useState, type FormEvent } from "react";
 import {
-  ZONES,
-  riskBand,
+  CircleDot,
+  Flag,
+  Clock3,
+  Route as RouteIcon,
+  Loader2,
+  GitCompareArrows,
+  Thermometer,
+} from "lucide-react";
+
+import { GoogleRouteMap } from "@/components/heatshield/GoogleRouteMap";
+
+import {
+  GlassCard,
+  LiveIndicator,
+  PageHeader,
+  ToneBadge,
+} from "@/components/heatshield/primitives";
+
+import { RouteCard } from "@/components/heatshield/cards";
+
+import {
+  computeRoutes,
   type RouteOption,
 } from "@/lib/heat-engine";
 
-import { getGoogleRoutes } from "@/lib/google-routes.functions";
+import { useMetro } from "@/lib/metros";
+
 import { cn } from "@/lib/utils";
 
-export const Route = createFileRoute("/app/safe-route")({
+export const Route = createFileRoute(
+  "/app/safe-route",
+)({
   head: () => ({
     meta: [
-      { title: "AI Safe Route — HeatShield AI" },
-      { name: "description", content: "Rank routes by thermal exposure — not distance alone. Compare heat-adjusted routes across the city with the FORTYGUARD Live Data Layer." },
-      { property: "og:title", content: "AI Safe Route — HeatShield AI" },
-      { property: "og:description", content: "Rank routes by thermal exposure — not distance alone." },
+      {
+        title: "AI Safe Route — HeatShield AI",
+      },
+      {
+        name: "description",
+        content:
+          "Rank routes by thermal exposure — not distance alone.",
+      },
+      {
+        property: "og:title",
+        content:
+          "AI Safe Route — HeatShield AI",
+      },
+      {
+        property: "og:description",
+        content:
+          "Rank routes by thermal exposure — not distance alone.",
+      },
     ],
   }),
+
   component: SafeRoutePage,
 });
 
 function SafeRoutePage() {
   const { metro } = useMetro();
-  const [start, setStart] = useState("UNLV Campus");
-  const [dest, setDest] = useState("Downtown Transit Center");
-  const [depart, setDepart] = useState("now");
-  const [loading, setLoading] = useState(false);
-  const [routes, setRoutes] = useState<RouteOption[] | null>(null);
-  const [activeId, setActiveId] = useState<string | undefined>(undefined);
-  const [compare, setCompare] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
-  const find = async (e: FormEvent) => {
-  e.preventDefault();
+  const [start, setStart] =
+    useState(metro.waypoints.start);
 
-  setLoading(true);
-  setRoutes(null);
-  setActiveId(undefined);
-  setCompare(false);
-  setError(null);
+  const [dest, setDest] =
+    useState(metro.waypoints.dest);
 
-  try {
-    const liveRoutes = await getGoogleRoutes({
-      data: {
-        start,
-        dest,
-      },
-    });
+  const [routes, setRoutes] =
+    useState<RouteOption[]>([]);
 
-    const nextRoutes: RouteOption[] =
-      liveRoutes.map((route, index) => {
-        /*
-         * Temporary thermal score.
-         *
-         * The distance/time are REAL Google Routes API values.
-         * The thermal score still comes from the existing
-         * HeatShield model and is not yet spatially sampled
-         * along the actual Google route.
-         */
-        const exposure = Math.min(
-          99,
-          Math.max(
-            20,
-            Math.round(48 + route.timeMin * 1.4),
-          ),
-        );
+  const [activeRouteId, setActiveRouteId] =
+    useState<string | undefined>();
 
-        return {
-          id: route.id,
+  const [compare, setCompare] =
+    useState(false);
 
-          label:
-            index === 0
-              ? "Route A — Fastest"
-              : index === 1
-                ? "Route B — Balanced"
-                : "Route C — Alternative",
+  const [loading, setLoading] =
+    useState(false);
 
-          distanceKm: route.distanceKm,
+  const [error, setError] =
+    useState<string | null>(null);
 
-          timeMin: route.timeMin,
+  /*
+   * Reset route state whenever the selected
+   * metro changes.
+   *
+   * This is important because routes are
+   * normalized against the selected metro.
+   */
+  useEffect(() => {
+    setStart(metro.waypoints.start);
+    setDest(metro.waypoints.dest);
+    setRoutes([]);
+    setActiveRouteId(undefined);
+    setCompare(false);
+    setError(null);
+  }, [metro]);
 
-          exposure,
+  const handleFindRoutes = (
+    event: FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
 
-          recommended: false,
-
-          tone: riskBand(exposure).tone,
-
-          path: [],
-
-          encodedPolyline:
-            route.encodedPolyline,
-        };
-      });
-
-    if (!nextRoutes.length) {
-      throw new Error(
-        "No routes were found between these locations.",
+    if (!start.trim() || !dest.trim()) {
+      setError(
+        "Enter both a starting point and destination.",
       );
+      return;
     }
 
-    const safest = nextRoutes.reduce(
-      (best, route) =>
-        route.exposure < best.exposure
-          ? route
-          : best,
-      nextRoutes[0]!,
+    setError(null);
+    setLoading(true);
+
+    try {
+      const nextRoutes = computeRoutes(
+        metro,
+        start,
+        dest,
+      );
+
+      setRoutes(nextRoutes);
+
+      setActiveRouteId(
+        nextRoutes[0]?.id,
+      );
+
+      if (nextRoutes.length === 0) {
+        setError(
+          "No safe route candidates were generated.",
+        );
+      }
+    } catch (err) {
+      console.error(
+        "[HeatShield AI] Route calculation failed:",
+        err,
+      );
+
+      setRoutes([]);
+      setActiveRouteId(undefined);
+
+      setError(
+        "Unable to calculate safe routes.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRoutesCalculated = (
+    calculatedRoutes: RouteOption[],
+  ) => {
+    setRoutes(calculatedRoutes);
+
+    setActiveRouteId(
+      calculatedRoutes[0]?.id,
     );
 
-    const rankedRoutes = nextRoutes.map(
-      (route) => ({
-        ...route,
+    setError(null);
+  };
 
-        recommended:
-          route.id === safest.id,
+  const handleRouteError = (
+    message: string,
+  ) => {
+    setError(message);
+  };
 
-        label:
-          route.id === safest.id
-            ? `${route.label} — Safest`
-            : route.label,
-      }),
-    );
-
-    setRoutes(rankedRoutes);
-    setActiveId(safest.id);
-  } catch (error) {
-    setError(
-      error instanceof Error
-        ? error.message
-        : "Unable to calculate routes.",
-    );
-  } finally {
-    setLoading(false);
-  }
-};
+  const activeRoute =
+    routes.find(
+      (route) =>
+        route.id === activeRouteId,
+    ) ?? routes[0];
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="AI Safe Route"
         subtitle="Rank routes by thermal exposure — not distance alone."
-        right={<LiveIndicator label="THERMAL ROUTING" tone="cyan" />}
+        right={
+          <div className="flex items-center gap-3">
+            <ToneBadge tone="cyan">
+              {metro.label.toUpperCase()}
+            </ToneBadge>
+
+            <LiveIndicator
+              label="LIVE"
+              tone="mint"
+            />
+          </div>
+        }
       />
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_1fr]">
-        {/* controls + results */}
-        <div className="space-y-4">
-          <GlassCard className="p-5">
-            <form onSubmit={find} className="space-y-4">
-              <div>
-                <label htmlFor="start" className="mb-1.5 block text-xs font-medium text-muted-foreground">Start location</label>
-                <div className="relative">
-                  <CircleDot className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-mint" />
-                  <input id="start" value={start} onChange={(e) => setStart(e.target.value)} className={inputCls} required />
-                </div>
-              </div>
-              <div>
-                <label htmlFor="dest" className="mb-1.5 block text-xs font-medium text-muted-foreground">Destination</label>
-                <div className="relative">
-                  <Flag className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-coral" />
-                  <input id="dest" value={dest} onChange={(e) => setDest(e.target.value)} className={inputCls} required />
-                </div>
-              </div>
-              <div>
-                <label htmlFor="depart" className="mb-1.5 block text-xs font-medium text-muted-foreground">Departure time</label>
-                <div className="relative">
-                  <Clock3 className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-                  <select id="depart" value={depart} onChange={(e) => setDepart(e.target.value)} className={cn(inputCls, "appearance-none")}>
-                    <option value="now">Leave now</option>
-                    <option value="morning">Tomorrow · 8:00 AM</option>
-                    <option value="noon">Tomorrow · 12:00 PM</option>
-                    <option value="evening">Tomorrow · 5:30 PM</option>
-                  </select>
-                </div>
-              </div>
-              <button
-                type="submit"
-                disabled={loading}
-                className="glow-peach flex w-full items-center justify-center gap-2 rounded-xl py-3 font-display text-sm font-semibold text-primary-foreground transition-transform hover:scale-[1.01] active:scale-[0.99] disabled:opacity-60"
-                style={{ background: "var(--gradient-peach)" }}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[360px_1fr]">
+        <GlassCard className="p-5">
+          <div className="mb-5">
+            <p className="font-display text-sm font-semibold">
+              Find a thermally safer route
+            </p>
+
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              Routes are ranked using heat
+              exposure, solar load and thermal
+              risk instead of distance alone.
+            </p>
+          </div>
+
+          <form
+            onSubmit={handleFindRoutes}
+            className="space-y-4"
+          >
+            <div>
+              <label
+                htmlFor="route-start"
+                className="mb-1.5 block text-[11px] font-semibold tracking-[0.14em] text-muted-foreground"
               >
-                {loading ? <Loader2 className="size-4 animate-spin" /> : <RouteIcon className="size-4" />}
-                {loading ? "Analyzing thermal corridors…" : "Find Safe Routes"}
-              </button>
-            </form>
-            {error ? (
-              <div className="mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-4">
-                <p className="text-sm font-semibold text-red-400">
-                  Route calculation failed
-                </p>
+                START
+              </label>
 
-                 <p className="mt-1 text-xs text-muted-foreground">
-                   {error}
-                 </p>
+              <div className="relative">
+                <CircleDot className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-cyan" />
+
+                <input
+                  id="route-start"
+                  value={start}
+                  onChange={(event) =>
+                    setStart(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="Starting location"
+                  className={inputCls}
+                />
               </div>
-            ) : null}
-          </GlassCard>
+            </div>
 
-          {routes ? (
-            <div className="space-y-3 animate-fade-up">
-              <div className="flex items-center justify-between">
-                <p className="font-display text-xs font-semibold tracking-[0.14em] text-muted-foreground">
-                  {routes.length} ROUTES FOUND
+            <div>
+              <label
+                htmlFor="route-destination"
+                className="mb-1.5 block text-[11px] font-semibold tracking-[0.14em] text-muted-foreground"
+              >
+                DESTINATION
+              </label>
+
+              <div className="relative">
+                <Flag className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-peach" />
+
+                <input
+                  id="route-destination"
+                  value={dest}
+                  onChange={(event) =>
+                    setDest(
+                      event.target.value,
+                    )
+                  }
+                  placeholder="Destination"
+                  className={inputCls}
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={
+                loading ||
+                !start.trim() ||
+                !dest.trim()
+              }
+              className={cn(
+                "flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-xs font-semibold",
+                "bg-gradient-to-r from-cyan to-mint text-background",
+                "transition-all duration-200",
+                "hover:brightness-110",
+                "disabled:cursor-not-allowed disabled:opacity-50",
+              )}
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="size-4 animate-spin" />
+                  Calculating…
+                </>
+              ) : (
+                <>
+                  <RouteIcon className="size-4" />
+                  Find Safe Routes
+                </>
+              )}
+            </button>
+          </form>
+
+          {error ? (
+            <div className="mt-4 rounded-xl border border-danger/30 bg-danger/5 px-3 py-2.5">
+              <p className="text-xs leading-relaxed text-danger">
+                {error}
+              </p>
+            </div>
+          ) : null}
+
+          {routes.length > 0 ? (
+            <div className="mt-5">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="font-display text-[11px] font-semibold tracking-[0.14em] text-muted-foreground">
+                  ROUTE OPTIONS
                 </p>
+
                 <button
                   type="button"
-                  onClick={() => {
-                    setCompare((c) => !c);
-                    setActiveId(undefined);
-                  }}
+                  onClick={() =>
+                    setCompare(
+                      (value) => !value,
+                    )
+                  }
                   className={cn(
-                    "flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-semibold transition-colors",
-                    compare ? "border-transparent text-primary-foreground" : "border-border text-muted-foreground hover:text-foreground",
+                    "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition",
+                    compare
+                      ? "bg-cyan/10 text-cyan"
+                      : "text-muted-foreground hover:text-foreground",
                   )}
-                  style={compare ? { background: "var(--gradient-cool)" } : undefined}
                 >
                   <GitCompareArrows className="size-3.5" />
-                  Compare Routes
+                  Compare
                 </button>
               </div>
-              {routes.map((r) => (
-                <RouteCard
-                  key={r.id}
-                  route={r}
-                  active={compare ? true : activeId === r.id}
-                  onSelect={(id) => {
-                    setCompare(false);
-                    setActiveId(id);
-                  }}
-                />
-              ))}
+
+              <div className="space-y-2.5">
+                {routes.map((route) => (
+                  <RouteCard
+                    key={route.id}
+                    route={route}
+                    active={
+                      route.id ===
+                      activeRouteId
+                    }
+                    onSelect={(id: string) => {
+                      setCompare(false);
+                      setActiveRouteId(id);
+                    }}
+                  />
+                ))}
+              </div>
             </div>
           ) : (
-            <GlassCard className="flex flex-col items-center gap-2 p-8 text-center">
-              <RouteIcon className="size-8 text-muted-foreground/50" />
-              <p className="text-sm text-muted-foreground">
-                Enter a start and destination to rank routes by heat exposure.
-              </p>
-            </GlassCard>
-          )}
-        </div>
+            <div className="mt-5 rounded-xl border border-dashed border-border px-4 py-5 text-center">
+              <RouteIcon className="mx-auto size-5 text-muted-foreground" />
 
-        {/* map — real 2D city map appears once routes are found */}
-        <div className="relative">
-          {routes ? (
-            <GoogleRouteMap
-              metro={metro}
-              routes={routes}
-              activeRouteId={activeId}
-              compare={compare}
-              className="h-[62vh] min-h-[420px] w-full animate-fade-up"
-            />
-          ) : (
-            <HeatMap
-              mode="2d"
-              zones={ZONES}
-              layer="risk"
-              className="h-[62vh] min-h-[420px] w-full"
-            />
+              <p className="mt-2 text-xs font-semibold">
+                No routes calculated yet
+              </p>
+
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                Enter a start and destination
+                to compare thermal exposure.
+              </p>
+            </div>
           )}
-          <div className="absolute bottom-9 left-3 flex flex-wrap gap-2">
-            {routes?.map((r) => (
-              <ToneBadge key={r.id} tone={r.tone}>
-                {r.id} · {r.exposure}/100{r.recommended ? " · SAFEST" : ""}
-              </ToneBadge>
-            ))}
-          </div>
-        </div>
+
+          {activeRoute ? (
+            <div className="mt-5 border-t border-border pt-4">
+              <p className="font-display text-[11px] font-semibold tracking-[0.14em] text-muted-foreground">
+                SELECTED ROUTE
+              </p>
+
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <Stat
+                  icon={Clock3}
+                  label="Time"
+                  value={`${activeRoute.timeMin} min`}
+                />
+
+                <Stat
+                  icon={Thermometer}
+                  label="Exposure"
+                  value={`${activeRoute.exposure}/100`}
+                />
+              </div>
+            </div>
+          ) : null}
+        </GlassCard>
+
+        <GlassCard className="min-h-[560px] overflow-hidden p-0">
+          <GoogleRouteMap
+            key={metro.id}
+            metro={metro}
+            start={start}
+            destination={dest}
+            routes={routes}
+            {...(
+              activeRouteId !==
+              undefined
+                ? {
+                    activeRouteId,
+                  }
+                : {}
+            )}
+            compare={compare}
+            onRoutesCalculated={
+              handleRoutesCalculated
+            }
+            onRouteError={
+              handleRouteError
+            }
+            className="min-h-[560px] rounded-none border-0"
+          />
+        </GlassCard>
       </div>
     </div>
   );
 }
 
+function Stat({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: React.ComponentType<{
+    className?: string;
+  }>;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-muted/20 p-3">
+      <div className="flex items-center gap-1.5">
+        <Icon className="size-3.5 text-muted-foreground" />
+
+        <p className="text-[10px] font-semibold tracking-wide text-muted-foreground">
+          {label.toUpperCase()}
+        </p>
+      </div>
+
+      <p className="mt-1 font-display text-sm font-semibold">
+        {value}
+      </p>
+    </div>
+  );
+}
+
 const inputCls =
-  "w-full rounded-xl border border-input bg-muted/40 py-2.5 pl-10 pr-4 text-sm outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-peach/60";
+  "w-full rounded-xl border border-border bg-background/60 py-3 pl-10 pr-3 text-sm text-foreground outline-none transition placeholder:text-muted-foreground focus:border-cyan/50 focus:ring-1 focus:ring-cyan/20";
