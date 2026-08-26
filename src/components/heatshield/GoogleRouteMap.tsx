@@ -23,12 +23,8 @@ interface GoogleRouteMapProps {
   routes: RouteOption[];
   activeRouteId?: string;
   compare?: boolean;
-  onRoutesCalculated: (
-    routes: RouteOption[],
-  ) => void;
-  onRouteError: (
-    message: string,
-  ) => void;
+  onRoutesCalculated: (routes: RouteOption[]) => void;
+  onRouteError: (message: string) => void;
   className?: string;
 }
 
@@ -44,13 +40,11 @@ function pathLatLng(
   return {
     lat:
       metro.box.north -
-      point.y *
-        (metro.box.north - metro.box.south),
+      point.y * (metro.box.north - metro.box.south),
 
     lng:
       metro.box.west +
-      point.x *
-        (metro.box.east - metro.box.west),
+      point.x * (metro.box.east - metro.box.west),
   };
 }
 
@@ -58,9 +52,7 @@ function getValidPoints(
   path: RouteOption["path"],
 ): RoutePoint[] {
   return path.filter(
-    (
-      point,
-    ): point is RoutePoint =>
+    (point): point is RoutePoint =>
       point != null &&
       Number.isFinite(point.x) &&
       Number.isFinite(point.y),
@@ -88,6 +80,10 @@ export function GoogleRouteMap({
       "VITE_GOOGLE_MAPS_TRACKING_ID"
     ] as string | undefined) ?? "";
 
+  /*
+   * Google Maps owns this element after initialization.
+   * React must never render children inside it.
+   */
   const mapContainerRef =
     useRef<HTMLDivElement>(null);
 
@@ -95,21 +91,12 @@ export function GoogleRouteMap({
     useRef<google.maps.Map | null>(null);
 
   const polylinesRef =
-    useRef<
-      Map<
-        string,
-        google.maps.Polyline
-      >
-    >(new Map());
+    useRef<Map<string, google.maps.Polyline>>(
+      new Map(),
+    );
 
   const markersRef =
     useRef<google.maps.Marker[]>([]);
-
-  const [ready, setReady] =
-    useState(false);
-
-  const [failed, setFailed] =
-    useState(false);
 
   const onRouteErrorRef =
     useRef(onRouteError);
@@ -117,6 +104,16 @@ export function GoogleRouteMap({
   const onRoutesCalculatedRef =
     useRef(onRoutesCalculated);
 
+  const [ready, setReady] =
+    useState(false);
+
+  const [failed, setFailed] =
+    useState(false);
+
+  /*
+   * Keep callback refs current without
+   * causing Google Maps to reinitialize.
+   */
   useEffect(() => {
     onRouteErrorRef.current =
       onRouteError;
@@ -128,7 +125,13 @@ export function GoogleRouteMap({
   }, [onRoutesCalculated]);
 
   /*
-   * Initialize Google Maps.
+   * Initialize Google Maps ONCE.
+   *
+   * IMPORTANT:
+   * metro is deliberately NOT a dependency.
+   *
+   * Changing metro must move the existing map,
+   * not destroy and recreate Google's DOM tree.
    */
   useEffect(() => {
     if (!browserKey) {
@@ -162,6 +165,14 @@ export function GoogleRouteMap({
           return;
         }
 
+        /*
+         * Never initialize twice on the same
+         * Google-owned container.
+         */
+        if (mapRef.current) {
+          return;
+        }
+
         const map =
           new google.maps.Map(
             container,
@@ -179,17 +190,19 @@ export function GoogleRouteMap({
 
               zoomControl: true,
 
-              gestureHandling:
-                "greedy",
+              gestureHandling: "greedy",
 
               clickableIcons: false,
 
-              backgroundColor:
-                "#070B16",
+              backgroundColor: "#070B16",
             },
           );
 
         if (cancelled) {
+          google.maps.event.clearInstanceListeners(
+            map,
+          );
+
           return;
         }
 
@@ -221,9 +234,12 @@ export function GoogleRouteMap({
     return () => {
       cancelled = true;
 
+      /*
+       * Remove overlays first.
+       */
       for (
         const polyline of
-        polylinesRef.current.values()
+          polylinesRef.current.values()
       ) {
         polyline.setMap(null);
       }
@@ -231,14 +247,21 @@ export function GoogleRouteMap({
       polylinesRef.current.clear();
 
       for (
-        const marker of
-        markersRef.current
+        const marker of markersRef.current
       ) {
         marker.setMap(null);
       }
 
       markersRef.current = [];
 
+      /*
+       * Remove map listeners.
+       *
+       * Do NOT manually clear or replace
+       * the container's DOM children.
+       *
+       * Google Maps owns them.
+       */
       if (mapRef.current) {
         google.maps.event.clearInstanceListeners(
           mapRef.current,
@@ -249,16 +272,20 @@ export function GoogleRouteMap({
 
       setReady(false);
     };
-  }, [
-    browserKey,
-    channel,
-    metro.id,
-    metro.lat,
-    metro.lng,
-  ]);
+
+    /*
+     * Intentionally initialize only once
+     * for this mounted component.
+     */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [browserKey]);
 
   /*
-   * Draw routes.
+   * Move the existing Google map when
+   * the selected metro changes.
+   *
+   * This is deliberately separate from
+   * initialization.
    */
   useEffect(() => {
     const map = mapRef.current;
@@ -267,9 +294,35 @@ export function GoogleRouteMap({
       return;
     }
 
+    map.panTo({
+      lat: metro.lat,
+      lng: metro.lng,
+    });
+
+    map.setZoom(13);
+  }, [
+    metro.id,
+    metro.lat,
+    metro.lng,
+    ready,
+  ]);
+
+  /*
+   * Draw route polylines.
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!map || !ready) {
+      return;
+    }
+
+    /*
+     * Remove previous route lines.
+     */
     for (
       const polyline of
-      polylinesRef.current.values()
+        polylinesRef.current.values()
     ) {
       polyline.setMap(null);
     }
@@ -292,32 +345,26 @@ export function GoogleRouteMap({
       }
 
       const validPoints =
-        getValidPoints(
-          route.path,
-        );
+        getValidPoints(route.path);
 
       if (!validPoints.length) {
         continue;
       }
 
       const points =
-        validPoints.map(
-          (point) =>
-            pathLatLng(
-              metro,
-              point,
-            ),
+        validPoints.map((point) =>
+          pathLatLng(
+            metro,
+            point,
+          ),
         );
 
       const isActive =
         compare ||
-        route.id ===
-          activeRouteId;
+        route.id === activeRouteId;
 
       const band =
-        riskBand(
-          route.exposure,
-        );
+        riskBand(route.exposure);
 
       const tone =
         TONE_HEX[band.tone];
@@ -373,7 +420,7 @@ export function GoogleRouteMap({
   ]);
 
   /*
-   * Draw start and destination markers.
+   * Draw start/end markers.
    */
   useEffect(() => {
     const map = mapRef.current;
@@ -383,8 +430,7 @@ export function GoogleRouteMap({
     }
 
     for (
-      const marker of
-      markersRef.current
+      const marker of markersRef.current
     ) {
       marker.setMap(null);
     }
@@ -398,8 +444,7 @@ export function GoogleRouteMap({
     const selectedRoute =
       routes.find(
         (route) =>
-          route.id ===
-          activeRouteId,
+          route.id === activeRouteId,
       ) ?? routes[0];
 
     if (!selectedRoute) {
@@ -442,10 +487,13 @@ export function GoogleRouteMap({
     const startMarker =
       new google.maps.Marker({
         map,
+
         position:
           startPosition,
+
         title:
           start || "Start",
+
         label: {
           text: "A",
           color: "#ffffff",
@@ -456,11 +504,14 @@ export function GoogleRouteMap({
     const endMarker =
       new google.maps.Marker({
         map,
+
         position:
           endPosition,
+
         title:
           destination ||
           "Destination",
+
         label: {
           text: "B",
           color: "#ffffff",
@@ -487,16 +538,21 @@ export function GoogleRouteMap({
   ]);
 
   /*
-   * Keep callback available for the existing
-   * GoogleRouteMapProps contract.
+   * Keep the callback contract alive.
+   *
+   * Routes are calculated elsewhere by the
+   * existing heat-engine / server-side route
+   * calculation code. This component only
+   * visualizes them.
    */
   useEffect(() => {
-    void onRoutesCalculatedRef.current;
-  }, []);
+    if (routes.length) {
+      onRoutesCalculatedRef.current(
+        routes,
+      );
+    }
+  }, [routes]);
 
-  /*
-   * Google Maps failed.
-   */
   if (failed) {
     return (
       <div
@@ -520,9 +576,6 @@ export function GoogleRouteMap({
     );
   }
 
-  /*
-   * Normal map.
-   */
   return (
     <div
       className={cn(
@@ -531,9 +584,10 @@ export function GoogleRouteMap({
       )}
     >
       {/*
-       * IMPORTANT:
        * Google Maps owns this DOM node.
-       * Never put React children inside it.
+       *
+       * React must NEVER render children
+       * inside this element.
        */}
       <div
         ref={mapContainerRef}
@@ -541,14 +595,17 @@ export function GoogleRouteMap({
       />
 
       {/*
-       * React-owned loading layer.
-       * This stays OUTSIDE the Google Maps node.
+       * Loading UI lives outside the
+       * Google-owned container.
        */}
       {!ready && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/60 backdrop-blur-sm">
           <div className="flex items-center gap-2 rounded-xl border border-border bg-card/90 px-4 py-3 text-xs text-muted-foreground shadow-xl">
             <Loader2 className="size-4 animate-spin text-cyan" />
-            <span>Loading map…</span>
+
+            <span>
+              Loading map…
+            </span>
           </div>
         </div>
       )}
